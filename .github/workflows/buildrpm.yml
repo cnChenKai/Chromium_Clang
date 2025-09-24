@@ -5,29 +5,18 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-rpm:
-    runs-on: ubuntu-20.04 # 或 ubuntu-22.04
-    
-    # 注意：Chromium 编译需要大量资源
-    # 如果可能，考虑使用自托管 runner
-    # strategy:
-    #   fail-fast: false
-    #   matrix:
-    #     include:
-    #       - runner: self-hosted
-    
-    env:
-      CHROMIUM_VERSION: "latest" # 或指定具体版本
-    
+    runs-on: ubuntu-20.04
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         submodules: recursive
-    
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -39,7 +28,7 @@ jobs:
           curl \
           wget \
           rpm \
-          rpmbuild \
+          rpm-build \
           rpmdevtools \
           libx11-dev \
           libx11-xcb-dev \
@@ -83,7 +72,6 @@ jobs:
           libpango1.0-dev \
           libatk1.0-dev \
           libatspi2.0-dev \
-          libx11-xcb-dev \
           ninja-build \
           clang \
           lld \
@@ -92,40 +80,44 @@ jobs:
 
     - name: Install depot_tools
       run: |
-        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
         echo "$HOME/depot_tools" >> $GITHUB_PATH
-        export PATH="$PATH:$HOME/depot_tools"
 
-    - name: Setup gclient
+    - name: Setup gclient config
       run: |
         mkdir -p chromium
         cd chromium
-        echo 'solutions = [
-          {
-            "name": "src",
-            "url": "https://chromium.googlesource.com/chromium/src.git",
-            "managed": False,
-            "custom_deps": {},
-            "custom_vars": {
-              "checkout_clang": True,
-            },
-          },
-        ]' > .gclient
+        cat > .gclient <<EOF
+solutions = [
+  {
+    "name": "src",
+    "url": "https://chromium.googlesource.com/chromium/src.git",
+    "managed": False,
+    "custom_deps": {},
+    "custom_vars": {
+      "checkout_clang": True,
+    },
+  },
+]
+EOF
 
-    - name: Sync Chromium source (this will take a VERY long time)
+    - name: Sync Chromium source
       run: |
         cd chromium
+        export PATH="$PATH:$HOME/depot_tools"
         gclient sync --no-history --shallow
-        
-    - name: Setup build environment
+
+    - name: Install build deps
       run: |
         cd chromium/src
+        export PATH="$PATH:$HOME/depot_tools"
         ./build/install-build-deps.sh --no-arm --no-chromeos-fonts --no-nacl
-        
+
     - name: Generate build files
       run: |
         cd chromium/src
-        gn gen out/Default --args='
+        export PATH="$PATH:$HOME/depot_tools"
+        gn gen out/Default --args="
           is_debug=false
           is_component_build=false
           is_clang=true
@@ -135,22 +127,23 @@ jobs:
           enable_nacl=false
           enable_widevine=false
           proprietary_codecs=true
-          ffmpeg_branding="Chrome"
+          ffmpeg_branding=\"Chrome\"
           symbol_level=0
           blink_symbol_level=0
           v8_symbol_level=0
-        '
-    
-    - name: Build Chromium (this will take HOURS and may fail due to resource limits)
+        "
+
+    - name: Build Chromium (may fail due to resource limits)
       run: |
         cd chromium/src
+        export PATH="$PATH:$HOME/depot_tools"
         ninja -C out/Default chrome
-        
+
     - name: Create RPM build structure
       run: |
         mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
         cp -r chromium/src/out/Default ~/rpmbuild/BUILD/chromium-clang
-        
+
     - name: Create RPM spec file
       run: |
         cat > ~/rpmbuild/SPECS/chromium-clang.spec << 'EOF'
@@ -172,13 +165,13 @@ Chromium browser compiled with the Clang/LLVM compiler.
 %setup -q
 
 %build
-# Build already done in previous steps
+# Build already completed
 
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/lib64/chromium-clang
-cp -r BUILD/chromium-clang/* %{buildroot}/usr/lib64/chromium-clang/
+cp -r %{_topdir}/BUILD/chromium-clang/* %{buildroot}/usr/lib64/chromium-clang/
 ln -s /usr/lib64/chromium-clang/chrome %{buildroot}/usr/bin/chromium-clang
 
 %files
@@ -191,19 +184,19 @@ ln -s /usr/lib64/chromium-clang/chrome %{buildroot}/usr/bin/chromium-clang
 - Initial build
 EOF
 
-    - name: Build RPM package
+    - name: Build RPM
       run: |
         cd ~/rpmbuild
         rpmbuild -ba SPECS/chromium-clang.spec
-        
+
     - name: Upload RPM artifacts
       uses: actions/upload-artifact@v3
       with:
         name: chromium-clang-rpm
         path: ~/rpmbuild/RPMS/**/*
         if-no-files-found: ignore
-        
-    - name: Upload SRPM artifacts
+
+    - name: Upload SRPM
       uses: actions/upload-artifact@v3
       with:
         name: chromium-clang-srpm
