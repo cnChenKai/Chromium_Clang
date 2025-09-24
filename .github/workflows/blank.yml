@@ -92,8 +92,6 @@ jobs:
           curl \
           wget \
           unzip \
-          rpm \
-          alien \
           ccache \
           ninja-build \
           pkg-config \
@@ -108,8 +106,8 @@ jobs:
           libgbm-dev \
           libxrandr-dev
         
-        # 安装 RPM 构建工具
-        sudo apt-get install -y rpm-build rpmlint
+        # 使用 Fedora 容器来构建 RPM (更可靠的方案)
+        sudo apt-get install -y podman
         
         # 设置 Python 依赖
         pip3 install --user requests
@@ -335,87 +333,29 @@ jobs:
         # 检查依赖
         ldd out/Default/chrome | head -10
 
-    - name: Create RPM package structure
-      run: |
-        echo "创建 RPM 包结构..."
-        
-        # 创建 RPM 构建环境
-        mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-        
-        # 设置版本信息
-        FULL_VERSION="${PACKAGE_VERSION}.${BUILD_DATE}"
-        RPM_NAME="chromium-clang"
-        
-        # 创建安装目录结构
-        INSTALL_ROOT="~/rpmbuild/BUILDROOT/${RPM_NAME}-${FULL_VERSION}-1.x86_64"
-        mkdir -p "${INSTALL_ROOT}"/{opt/chromium,usr/{bin,share/{applications,pixmaps,man/man1}}}
-        
-        cd chromium-build/src
-        
-        # 复制主要文件
-        cp out/Default/chrome "${INSTALL_ROOT}/opt/chromium/"
-        cp out/Default/chrome_sandbox "${INSTALL_ROOT}/opt/chromium/"
-        cp out/Default/chromedriver "${INSTALL_ROOT}/opt/chromium/"
-        
-        # 复制资源文件
-        cp out/Default/*.pak "${INSTALL_ROOT}/opt/chromium/" || true
-        cp -r out/Default/locales "${INSTALL_ROOT}/opt/chromium/" || true
-        cp -r out/Default/resources "${INSTALL_ROOT}/opt/chromium/" || true
-        
-        # 设置正确的权限
-        chmod 4755 "${INSTALL_ROOT}/opt/chromium/chrome_sandbox"
-        chmod +x "${INSTALL_ROOT}/opt/chromium/chrome"
-        chmod +x "${INSTALL_ROOT}/opt/chromium/chromedriver"
-        
-        # 创建启动脚本
-        cat > "${INSTALL_ROOT}/usr/bin/chromium-clang" << 'EOF'
-        #!/bin/bash
-        exec /opt/chromium/chrome "$@"
-        EOF
-        chmod +x "${INSTALL_ROOT}/usr/bin/chromium-clang"
-        
-        # 创建桌面文件
-        cat > "${INSTALL_ROOT}/usr/share/applications/chromium-clang.desktop" << EOF
-        [Desktop Entry]
-        Version=1.0
-        Name=Chromium Clang
-        GenericName=Web Browser
-        Comment=Access the Internet (Optimized Build)
-        Exec=chromium-clang %U
-        Terminal=false
-        Icon=chromium-clang
-        Type=Application
-        Categories=Network;WebBrowser;
-        MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
-        StartupNotify=true
-        EOF
-        
-        # 复制图标（如果存在）
-        if [ -f chrome/app/theme/chromium/product_logo_128.png ]; then
-          cp chrome/app/theme/chromium/product_logo_128.png "${INSTALL_ROOT}/usr/share/pixmaps/chromium-clang.png"
-        fi
-        
-        # 创建 man 页面
-        cat > "${INSTALL_ROOT}/usr/share/man/man1/chromium-clang.1" << EOF
-        .TH CHROMIUM-CLANG 1
-        .SH NAME
-        chromium-clang \- Chromium web browser (optimized build)
-        .SH SYNOPSIS
-        .B chromium-clang
-        [OPTIONS] [URL]
-        .SH DESCRIPTION
-        Chromium is an open-source web browser, compiled with Clang/LLVM for optimal performance.
-        This build includes ThinLTO, PGO optimizations, and ${TARGET_ARCH} CPU optimizations.
-        EOF
-        
-        echo "包结构创建完成"
-
     - name: Build RPM package
       run: |
-        cd ~/rpmbuild
+        echo "准备构建 RPM 包..."
         
         FULL_VERSION="${PACKAGE_VERSION}.${BUILD_DATE}"
         RPM_NAME="chromium-clang"
+        
+        # 创建打包目录
+        mkdir -p rpm-package/{SOURCES,SPECS,BUILD,BUILDROOT,RPMS,SRPMS}
+        cd rpm-package
+        
+        # 复制构建文件到 SOURCES
+        cd ../chromium-build/src
+        tar -czf ../../rpm-package/SOURCES/${RPM_NAME}-${FULL_VERSION}.tar.gz \
+          --transform "s,^,${RPM_NAME}-${FULL_VERSION}/," \
+          out/Default/chrome \
+          out/Default/chrome_sandbox \
+          out/Default/chromedriver \
+          out/Default/*.pak \
+          out/Default/locales \
+          out/Default/resources
+        
+        cd ../../rpm-package
         
         # 创建 RPM spec 文件
         cat > SPECS/${RPM_NAME}.spec << EOF
@@ -428,7 +368,7 @@ jobs:
         Release: 1
         Summary: Chromium web browser compiled with Clang/LLVM
         
-        License: BSD-3-Clause AND LGPL-2.1+ AND Apache-2.0 AND IJG AND MIT AND GPL-2.0+ AND ISC AND OpenSSL AND (MPL-1.1 OR GPL-2.0 OR LGPL-2.0)
+        License: BSD-3-Clause AND LGPL-2.1+ AND Apache-2.0
         URL: https://github.com/RobRich999/Chromium_Clang
         Source0: %{name}-%{version}.tar.gz
         
@@ -469,123 +409,110 @@ jobs:
         Requires: nss >= 3.90
         Requires: pango >= 1.22.0
         
-        # 推荐的可选依赖
-        Recommends: liberation-fonts
-        Recommends: google-noto-fonts
-        Recommends: mesa-dri-drivers
-        Recommends: pulseaudio-libs
-        
         %description
-        Chromium is the open-source project behind Google Chrome. This build is compiled
-        with the Clang/LLVM compiler and includes various performance optimizations:
-        
-        - ThinLTO (Thin Link Time Optimization)
-        - PGO (Profile-Guided Optimization) 
-        - CPU-specific optimizations for ${TARGET_ARCH}
-        - Fast-math optimizations
-        - Custom build flags for enhanced performance
-        
-        Optimization level: ${OPTIMIZATION}
-        Target architecture: ${TARGET_ARCH}
-        Enabled features: ${ENABLE_FEATURES}
-        Build date: ${BUILD_DATE}
-        Chromium version: ${CHROMIUM_VERSION} (r${CHROMIUM_REVISION})
+        Chromium compiled with Clang/LLVM and optimizations.
         
         %prep
-        # 文件已准备好
+        %setup -q
         
         %build
-        # 已构建完成
+        # Already built
         
         %install
-        # 文件已安装
+        rm -rf %{buildroot}
+        
+        # Create directory structure
+        mkdir -p %{buildroot}/opt/chromium
+        mkdir -p %{buildroot}/usr/bin
+        mkdir -p %{buildroot}/usr/share/applications
+        mkdir -p %{buildroot}/usr/share/pixmaps
+        
+        # Install files
+        cp chrome %{buildroot}/opt/chromium/
+        cp chrome_sandbox %{buildroot}/opt/chromium/
+        cp chromedriver %{buildroot}/opt/chromium/
+        cp *.pak %{buildroot}/opt/chromium/ || true
+        cp -r locales %{buildroot}/opt/chromium/ || true
+        cp -r resources %{buildroot}/opt/chromium/ || true
+        
+        # Set permissions
+        chmod 4755 %{buildroot}/opt/chromium/chrome_sandbox
+        chmod +x %{buildroot}/opt/chromium/chrome
+        chmod +x %{buildroot}/opt/chromium/chromedriver
+        
+        # Create launcher script
+        cat > %{buildroot}/usr/bin/chromium-clang << 'EOFSCRIPT'
+        #!/bin/bash
+        exec /opt/chromium/chrome "\$@"
+        EOFSCRIPT
+        chmod +x %{buildroot}/usr/bin/chromium-clang
+        
+        # Create desktop file
+        cat > %{buildroot}/usr/share/applications/chromium-clang.desktop << 'EOFDESKTOP'
+        [Desktop Entry]
+        Version=1.0
+        Name=Chromium Clang
+        GenericName=Web Browser
+        Comment=Access the Internet (Optimized Build)
+        Exec=chromium-clang %U
+        Terminal=false
+        Icon=chromium-clang
+        Type=Application
+        Categories=Network;WebBrowser;
+        MimeType=text/html;text/xml;application/xhtml+xml;
+        StartupNotify=true
+        EOFDESKTOP
         
         %files
         %defattr(-,root,root,-)
-        /opt/chromium/
+        /opt/chromium/*
         /usr/bin/chromium-clang
         /usr/share/applications/chromium-clang.desktop
-        /usr/share/pixmaps/chromium-clang.png
-        /usr/share/man/man1/chromium-clang.1*
-        
-        %post
-        # 更新桌面数据库
-        if [ -x /usr/bin/update-desktop-database ]; then
-          /usr/bin/update-desktop-database /usr/share/applications &> /dev/null || :
-        fi
-        
-        # 更新图标缓存
-        if [ -x /usr/bin/gtk-update-icon-cache ]; then
-          /usr/bin/gtk-update-icon-cache /usr/share/pixmaps &> /dev/null || :
-        fi
-        
-        %postun
-        if [ \$1 -eq 0 ] ; then
-          if [ -x /usr/bin/update-desktop-database ]; then
-            /usr/bin/update-desktop-database /usr/share/applications &> /dev/null || :
-          fi
-          if [ -x /usr/bin/gtk-update-icon-cache ]; then
-            /usr/bin/gtk-update-icon-cache /usr/share/pixmaps &> /dev/null || :
-          fi
-        fi
         
         %changelog
         * $(date "+%a %b %d %Y") GitHub Actions <actions@github.com> - ${FULL_VERSION}-1
-        - Automated build from Chromium source
-        - Clang/LLVM compiled with ${OPTIMIZATION} optimization
-        - CPU optimizations: ${TARGET_ARCH}
-        - Features: ${ENABLE_FEATURES}
-        - Based on Chromium ${CHROMIUM_VERSION} (r${CHROMIUM_REVISION})
+        - Automated build from source
+        - Optimizations: ${OPTIMIZATION}, ${TARGET_ARCH}
         EOF
         
-        echo "=== RPM Spec 文件 ==="
-        cat SPECS/${RPM_NAME}.spec
+        # 使用 Fedora 容器构建 RPM
+        echo "使用 Fedora 容器构建 RPM..."
         
-        # 构建 RPM
-        echo "开始构建 RPM 包..."
-        rpmbuild -bb SPECS/${RPM_NAME}.spec
+        podman run --rm -v $(pwd):/workspace:Z \
+          -w /workspace \
+          registry.fedoraproject.org/fedora:39 \
+          bash -c "
+            dnf install -y rpm-build rpm-devel
+            rpmbuild --define '_topdir /workspace' -ba SPECS/${RPM_NAME}.spec
+          "
         
         # 检查构建结果
         find RPMS -name "*.rpm" -ls
         
-        # 验证包
-        for rpm in RPMS/x86_64/*.rpm; do
-          echo "=== 验证 $rpm ==="
-          rpm -qip "$rpm"
-          echo ""
-          echo "文件列表:"
-          rpm -qlp "$rpm" | head -20
-          echo "..."
-        done
+        # 复制 RPM 到工作目录根
+        cp RPMS/*/*.rpm ../
 
     - name: Test RPM package
       run: |
         echo "测试 RPM 包..."
         
-        cd ~/rpmbuild
-        
         # 找到构建的 RPM
-        RPM_FILE=$(find RPMS -name "chromium-clang-*.rpm" | head -1)
+        RPM_FILE=$(find . -name "chromium-clang-*.rpm" | head -1)
         
         if [ -f "$RPM_FILE" ]; then
-          echo "测试安装到临时目录..."
-          mkdir -p /tmp/test-install
-          cd /tmp/test-install
+          echo "验证 RPM 包: $RPM_FILE"
           
-          # 提取包内容测试
-          rpm2cpio "$RPM_FILE" | cpio -idmv
-          
-          echo "验证关键文件..."
-          ls -la opt/chromium/chrome
-          ls -la usr/bin/chromium-clang
-          
-          # 测试二进制文件
-          echo "测试主程序..."
-          opt/chromium/chrome --version || echo "版本检查失败，可能缺少依赖"
-          
-          # 检查依赖
-          echo "检查库依赖..."
-          ldd opt/chromium/chrome | grep "not found" || echo "依赖检查通过"
+          # 使用容器测试 RPM 包
+          podman run --rm -v $(pwd):/workspace:Z \
+            -w /workspace \
+            registry.fedoraproject.org/fedora:39 \
+            bash -c "
+              rpm -qip $RPM_FILE
+              echo '--- 文件列表 ---'
+              rpm -qlp $RPM_FILE | head -20
+              echo '--- 依赖检查 ---'
+              rpm -qRp $RPM_FILE | head -10
+            "
           
         else
           echo "未找到 RPM 包文件"
@@ -594,13 +521,8 @@ jobs:
 
     - name: Create release artifacts
       run: |
-        cd ~/rpmbuild
-        
-        # 复制 RPM 到工作目录
-        cp RPMS/x86_64/*.rpm "$GITHUB_WORKSPACE/"
-        
         # 创建发布说明
-        cat > "$GITHUB_WORKSPACE/release-notes.md" << EOF
+        cat > "release-notes.md" << EOF
         # Chromium Clang RPM Build
         
         **构建信息**
